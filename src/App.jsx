@@ -1,1598 +1,965 @@
-import React, { useState, useRef, useEffect } from 'react';
-import { Upload, FileText, CheckCircle, AlertCircle, Download, Play, Zap, Shield, Lightbulb, Network, BarChart3, ArrowLeft, Github, Archive, Link, Settings, Key } from 'lucide-react';
-import { config, isApiKeyConfigured, getMaskedApiKey } from './config';
+// Enhanced Code Analyzer with Chunking Support
+// This extends the original code analyzer to handle large files by breaking them into chunks
 
-const App = () => {
+import React, { useState, useRef, useCallback, useEffect } from 'react';
+
+const MAX_CHUNK_SIZE = 8000; // Character limit per chunk
+const OVERLAP_SIZE = 200; // Overlap between chunks for context
+const MAX_FILE_SIZE = 500000; // Maximum file size to process (500KB)
+
+const EnhancedCodeAnalyzer = () => {
   const [files, setFiles] = useState([]);
-  const [analyzing, setAnalyzing] = useState(false);
-  const [analysisResults, setAnalysisResults] = useState({});
-  const [currentAnalysis, setCurrentAnalysis] = useState('');
-  const [systemAnalysis, setSystemAnalysis] = useState(null);
-  const [analyzingSystem, setAnalyzingSystem] = useState(false);
-  const [plainEnglishReport, setPlainEnglishReport] = useState(null);
-  const [generatingReport, setGeneratingReport] = useState(false);
-  const [userNotes, setUserNotes] = useState('');
-  const [followUpQuestions, setFollowUpQuestions] = useState([]);
-  const [apiStatus, setApiStatus] = useState({ hasIssues: false, message: '', type: '' });
-  const [analysisMode, setAnalysisMode] = useState('single');
-  const [githubUrl, setGithubUrl] = useState('');
-  const [loadingRepo, setLoadingRepo] = useState(false);
-  const [apiKey, setApiKey] = useState(config.apiKey || '');
-  const [showApiKeyModal, setShowApiKeyModal] = useState(false);
+  const [analysisResults, setAnalysisResults] = useState([]);
+  const [loading, setLoading] = useState(false);
+  const [apiKey, setApiKey] = useState(localStorage.getItem('anthropic_api_key') || '');
+  const [apiKeyValid, setApiKeyValid] = useState(null);
+  const [apiKeyValidating, setApiKeyValidating] = useState(false);
+  const [userEmail, setUserEmail] = useState(localStorage.getItem('user_email') || '');
+  const [emailResults, setEmailResults] = useState(localStorage.getItem('email_results') === 'true');
+  const [analysisMode, setAnalysisMode] = useState('individual');
+  const [emailSending, setEmailSending] = useState(false);
   const fileInputRef = useRef(null);
-  const folderInputRef = useRef(null);
-  const zipInputRef = useRef(null);
 
+  // Function to validate API key
+  const validateApiKey = async (key) => {
+    if (!key || !key.startsWith('sk-ant-')) {
+      return { valid: false, error: 'Invalid API key format' };
+    }
+
+    try {
+      const response = await fetch('https://api.anthropic.com/v1/messages', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-api-key': key,
+          'anthropic-version': '2023-06-01'
+        },
+        body: JSON.stringify({
+          model: 'claude-3-sonnet-20240229',
+          max_tokens: 10,
+          messages: [{ role: 'user', content: 'Hello' }]
+        })
+      });
+
+      if (response.ok) {
+        return { valid: true, error: null };
+      } else if (response.status === 401) {
+        return { valid: false, error: 'Invalid API key' };
+      } else if (response.status === 429) {
+        return { valid: false, error: 'Rate limit exceeded or insufficient credits' };
+      } else {
+        return { valid: false, error: `API error: ${response.status}` };
+      }
+    } catch (error) {
+      return { valid: false, error: `Network error: ${error.message}` };
+    }
+  };
+
+  // Function to validate API key on change
+  const handleApiKeyValidation = async (key) => {
+    if (!key) {
+      setApiKeyValid(null);
+      return;
+    }
+
+    setApiKeyValidating(true);
+    const validation = await validateApiKey(key);
+    setApiKeyValid(validation.valid);
+    setApiKeyValidating(false);
+
+    if (!validation.valid) {
+      alert(`API Key Validation Failed: ${validation.error}`);
+    }
+  };
+
+  // Email functionality using EmailJS
+  const initializeEmailJS = () => {
+    // Initialize EmailJS (you'll need to sign up at emailjs.com and get your keys)
+    if (window.emailjs) {
+      window.emailjs.init("YOUR_EMAILJS_USER_ID"); // Replace with your EmailJS User ID
+    }
+  };
+
+  // Send analysis results via email
+  const sendAnalysisEmail = async (results, userEmail) => {
+    if (!userEmail || !window.emailjs) {
+      console.warn('Email not configured or user email missing');
+      return false;
+    }
+
+    setEmailSending(true);
+    
+    try {
+      // Format results for email
+      const emailContent = formatResultsForEmail(results);
+      
+      const templateParams = {
+        to_email: userEmail,
+        from_name: 'Enhanced Code Analyzer',
+        subject: `Code Analysis Results - ${new Date().toLocaleDateString()}`,
+        message: emailContent,
+        analysis_date: new Date().toLocaleString(),
+        total_files: results.length,
+        total_issues: results.reduce((sum, result) => 
+          sum + (result.allIssues ? result.allIssues.length : (result.issues ? result.issues.length : 0)), 0
+        )
+      };
+
+      await window.emailjs.send(
+        'YOUR_EMAIL_SERVICE_ID', // Replace with your EmailJS service ID
+        'YOUR_EMAIL_TEMPLATE_ID', // Replace with your EmailJS template ID
+        templateParams
+      );
+
+      return true;
+    } catch (error) {
+      console.error('Email sending failed:', error);
+      return false;
+    } finally {
+      setEmailSending(false);
+    }
+  };
+
+  // Format analysis results for email
+  const formatResultsForEmail = (results) => {
+    let emailContent = "Code Analysis Results\n";
+    emailContent += "=" + "=".repeat(50) + "\n\n";
+
+    results.forEach((result, index) => {
+      emailContent += `File ${index + 1}: ${result.fileName}\n`;
+      emailContent += "-".repeat(30) + "\n";
+      
+      if (result.error) {
+        emailContent += `Error: ${result.error}\n\n`;
+        return;
+      }
+
+      if (result.overallSummary) {
+        emailContent += `Total Chunks: ${result.totalChunks}\n`;
+        emailContent += `Total Issues: ${result.overallSummary.totalIssues}\n`;
+        emailContent += `High Severity: ${result.overallSummary.highSeverityIssues}\n`;
+        emailContent += `Security Issues: ${result.overallSummary.securityIssues}\n\n`;
+      }
+
+      const issues = result.allIssues || result.issues || [];
+      if (issues.length > 0) {
+        emailContent += "Issues Found:\n";
+        issues.forEach((issue, issueIndex) => {
+          emailContent += `${issueIndex + 1}. [${issue.severity?.toUpperCase()}] ${issue.description}\n`;
+          if (issue.suggestion) {
+            emailContent += `   Suggestion: ${issue.suggestion}\n`;
+          }
+        });
+        emailContent += "\n";
+      }
+
+      if (result.recommendations && result.recommendations.length > 0) {
+        emailContent += "Recommendations:\n";
+        result.recommendations.forEach((rec, recIndex) => {
+          emailContent += `${recIndex + 1}. ${rec.action}: ${rec.details}\n`;
+        });
+        emailContent += "\n";
+      }
+
+      emailContent += "\n";
+    });
+
+    return emailContent;
+  };
+
+  // Initialize EmailJS on component mount
   useEffect(() => {
-    if (folderInputRef.current) {
-      folderInputRef.current.webkitdirectory = true;
+    // Load EmailJS script
+    const script = document.createElement('script');
+    script.src = 'https://cdn.jsdelivr.net/npm/@emailjs/browser@3/dist/email.min.js';
+    script.onload = initializeEmailJS;
+    document.head.appendChild(script);
+
+    return () => {
+      document.head.removeChild(script);
+    };
+  }, []);
+
+  // Validate API key when component mounts or key changes
+  useEffect(() => {
+    if (apiKey) {
+      handleApiKeyValidation(apiKey);
     }
   }, []);
 
-  const supportedExtensions = [
-    '.js', '.jsx', '.ts', '.tsx',           // JavaScript/TypeScript
-    '.py', '.pyw', '.pyc',                  // Python (including .pyw and .pyc)
-    '.java', '.cpp', '.c', '.cs', '.h',     // Compiled languages
-    '.php', '.rb', '.go', '.rs', '.swift',  // Other languages
-    '.kt', '.scala', '.html', '.css',       // More languages
-    '.json', '.md', '.sql', '.sh',          // Data/Script files
-    '.yml', '.yaml', '.xml', '.toml'        // Config files
-  ];
-
-  const handleFileUpload = (uploadedFiles) => {
-    console.log(`=== FILE UPLOAD DEBUG ===`);
-    console.log(`Total files dropped/selected: ${uploadedFiles.length}`);
-    
-    Array.from(uploadedFiles).forEach((file, index) => {
-      console.log(`\nFile ${index + 1}:`);
-      console.log(`- Name: ${file.name}`);
-      console.log(`- Size: ${file.size} bytes`);
-      console.log(`- Type: ${file.type}`);
-      console.log(`- Last Modified: ${new Date(file.lastModified)}`);
-      
-      // Check if it's a zip file
-      if (file.name.toLowerCase().endsWith('.zip') || file.type === 'application/zip' || file.type === 'application/x-zip-compressed') {
-        console.log(`- Detected ZIP file, processing...`);
-        handleZipFile(file);
-        return;
-      }
-      
-      const extension = '.' + file.name.split('.').pop().toLowerCase();
-      const isValid = supportedExtensions.includes(extension);
-      console.log(`- Extension: ${extension}`);
-      console.log(`- Valid: ${isValid}`);
-      
-      if (!isValid) {
-        console.log(`- REJECTED: Extension not in supported list`);
-        console.log(`- Supported extensions:`, supportedExtensions);
-      }
-    });
-
-    const validFiles = Array.from(uploadedFiles).filter(file => {
-      // Skip zip files as they're handled separately
-      if (file.name.toLowerCase().endsWith('.zip') || file.type === 'application/zip' || file.type === 'application/x-zip-compressed') {
-        return false;
-      }
-      const extension = '.' + file.name.split('.').pop().toLowerCase();
-      return supportedExtensions.includes(extension);
-    });
-
-    console.log(`\nResult: ${validFiles.length} valid files out of ${uploadedFiles.length} total`);
-    if (validFiles.length > 0) {
-      setFiles(prevFiles => [...prevFiles, ...validFiles]);
-    }
-  };
-
-  const handleZipFile = async (zipFile) => {
-    try {
-      console.log(`Processing ZIP file: ${zipFile.name}`);
-      setCurrentAnalysis(`Extracting ZIP file: ${zipFile.name}...`);
-      
-      // Import JSZip dynamically
-      const JSZip = await loadJSZip();
-      
-      const arrayBuffer = await zipFile.arrayBuffer();
-      const zip = new JSZip();
-      const zipContent = await zip.loadAsync(arrayBuffer);
-      
-      console.log('ZIP file loaded successfully');
-      const extractedFiles = [];
-      
-      // Process each file in the ZIP
-      for (const [path, zipEntry] of Object.entries(zipContent.files)) {
-        if (!zipEntry.dir) { // Skip directories
-          try {
-            const extension = '.' + path.split('.').pop().toLowerCase();
-            
-            // Check if it's a supported file type
-            if (supportedExtensions.includes(extension)) {
-              console.log(`Extracting supported file: ${path}`);
-              
-              const content = await zipEntry.async('text');
-              
-              // Create a File object
-              const blob = new Blob([content], { type: 'text/plain' });
-              const file = new File([blob], path.split('/').pop(), { type: 'text/plain' });
-              
-              // Add path information
-              file.displayPath = path;
-              file.fileName = path.split('/').pop();
-              
-              extractedFiles.push(file);
-            } else {
-              console.log(`Skipping unsupported file: ${path} (${extension})`);
-            }
-          } catch (error) {
-            console.warn(`Could not extract file ${path}:`, error);
-          }
-        }
-      }
-      
-      console.log(`Successfully extracted ${extractedFiles.length} supported files from ZIP`);
-      
-      if (extractedFiles.length > 0) {
-        setFiles(prevFiles => [...prevFiles, ...extractedFiles]);
-        alert(`Successfully extracted ${extractedFiles.length} code files from ${zipFile.name}!`);
-      } else {
-        alert('No supported code files found in the ZIP archive. Please check that your ZIP contains programming files with supported extensions.');
-      }
-      
-    } catch (error) {
-      console.error('Error processing ZIP file:', error);
-      alert(`Could not process ZIP file: ${error.message}\n\nPlease ensure the file is a valid ZIP archive and try again.`);
-    } finally {
-      setCurrentAnalysis('');
-    }
-  };
-
-  const loadJSZip = async () => {
-    // Check if JSZip is already loaded
-    if (window.JSZip) {
-      return window.JSZip;
-    }
-    
-    // Load JSZip from CDN
-    return new Promise((resolve, reject) => {
-      const script = document.createElement('script');
-      script.src = 'https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js';
-      script.onload = () => {
-        console.log('JSZip loaded successfully');
-        resolve(window.JSZip);
-      };
-      script.onerror = (error) => {
-        console.error('Failed to load JSZip:', error);
-        reject(new Error('Failed to load ZIP processing library. Please check your internet connection and try again.'));
-      };
-      document.head.appendChild(script);
-    });
-  };
-
-  const handleGithubRepo = async () => {
-    if (!githubUrl.trim()) {
-      alert('Please enter a GitHub repository URL');
-      return;
+  // Function to chunk large content into smaller pieces
+  const chunkContent = (content, fileName) => {
+    if (content.length <= MAX_CHUNK_SIZE) {
+      return [{ content, chunkIndex: 0, totalChunks: 1, fileName }];
     }
 
-    try {
-      setLoadingRepo(true);
-      setCurrentAnalysis('Loading GitHub repository...');
+    const chunks = [];
+    let currentPosition = 0;
+    let chunkIndex = 0;
 
-      // Extract owner and repo from URL
-      const urlMatch = githubUrl.match(/github\.com\/([^\/]+)\/([^\/]+)/);
-      if (!urlMatch) {
-        throw new Error('Invalid GitHub URL format. Use: https://github.com/owner/repo');
-      }
-
-      const [, owner, repo] = urlMatch;
-      const cleanRepo = repo.replace(/\.git$/, ''); // Remove .git suffix if present
-
-      console.log(`Fetching repository: ${owner}/${cleanRepo}`);
-
-      // Use GitHub API to get repository contents
-      const apiUrl = `https://api.github.com/repos/${owner}/${cleanRepo}/contents`;
+    while (currentPosition < content.length) {
+      let chunkEnd = Math.min(currentPosition + MAX_CHUNK_SIZE, content.length);
       
-      const response = await fetch(apiUrl);
-      if (!response.ok) {
-        if (response.status === 404) {
-          throw new Error('Repository not found. Please check the URL and make sure the repository is public.');
-        }
-        throw new Error(`GitHub API error: ${response.status}`);
-      }
-
-      const contents = await response.json();
-      console.log('Repository contents:', contents);
-
-      // Recursively fetch all files
-      const allFiles = await fetchAllRepoFiles(owner, cleanRepo, '');
-      
-      console.log(`Found ${allFiles.length} files in repository`);
-      
-      // Filter for supported file types
-      const validFiles = allFiles.filter(file => {
-        const extension = '.' + file.name.split('.').pop().toLowerCase();
-        return supportedExtensions.includes(extension);
-      });
-
-      console.log(`${validFiles.length} files match supported extensions`);
-
-      if (validFiles.length === 0) {
-        alert('No supported code files found in this repository.');
-        return;
-      }
-
-      // Create File objects from the repository files
-      const fileObjects = validFiles.map(file => {
-        const blob = new Blob([file.content], { type: 'text/plain' });
-        const fileObj = new File([blob], file.name, { type: 'text/plain' });
-        fileObj.displayPath = file.path;
-        fileObj.fileName = file.name;
-        return fileObj;
-      });
-
-      setFiles(prevFiles => [...prevFiles, ...fileObjects]);
-      setGithubUrl(''); // Clear the input
-      
-      alert(`Successfully loaded ${fileObjects.length} code files from ${owner}/${cleanRepo}`);
-
-    } catch (error) {
-      console.error('Error loading GitHub repository:', error);
-      alert(`Error loading repository: ${error.message}`);
-    } finally {
-      setLoadingRepo(false);
-      setCurrentAnalysis('');
-    }
-  };
-
-  const fetchAllRepoFiles = async (owner, repo, path = '') => {
-    try {
-      const apiUrl = `https://api.github.com/repos/${owner}/${repo}/contents/${path}`;
-      const response = await fetch(apiUrl);
-      
-      if (!response.ok) {
-        console.warn(`Could not fetch contents for path: ${path}`);
-        return [];
-      }
-
-      const contents = await response.json();
-      let allFiles = [];
-
-      for (const item of contents) {
-        if (item.type === 'file') {
-          // Fetch file content
-          try {
-            const fileResponse = await fetch(item.download_url);
-            if (fileResponse.ok) {
-              const content = await fileResponse.text();
-              allFiles.push({
-                name: item.name,
-                path: item.path,
-                content: content
-              });
-            }
-          } catch (error) {
-            console.warn(`Could not fetch file: ${item.path}`, error);
-          }
-        } else if (item.type === 'dir') {
-          // Recursively fetch directory contents (limit depth to avoid infinite loops)
-          const depth = path.split('/').filter(p => p).length;
-          if (depth < 10) { // Limit recursion depth
-            const subFiles = await fetchAllRepoFiles(owner, repo, item.path);
-            allFiles = [...allFiles, ...subFiles];
-          }
-        }
-      }
-
-      return allFiles;
-    } catch (error) {
-      console.error(`Error fetching repository contents for path ${path}:`, error);
-      return [];
-    }
-  };
-
-  const handleFolderUpload = (uploadedFiles) => {
-    console.log(`=== FOLDER UPLOAD DEBUG ===`);
-    console.log(`Total files dropped/selected: ${uploadedFiles.length}`);
-    
-    const validFiles = Array.from(uploadedFiles).filter(file => {
-      const extension = '.' + file.name.split('.').pop().toLowerCase();
-      const isValid = supportedExtensions.includes(extension);
-      console.log(`File: ${file.name}, Extension: ${extension}, Valid: ${isValid}`);
-      return isValid;
-    });
-
-    const filesWithPath = validFiles.map(file => ({
-      ...file,
-      displayPath: file.webkitRelativePath || file.name,
-      fileName: file.name
-    }));
-
-    console.log(`Found ${filesWithPath.length} valid files in folder out of ${uploadedFiles.length} total files`);
-    setFiles(prevFiles => [...prevFiles, ...filesWithPath]);
-  };
-
-  const handleDrop = (e) => {
-    e.preventDefault();
-    const droppedItems = e.dataTransfer.items;
-    const droppedFiles = e.dataTransfer.files;
-    
-    // Check if any dropped files are zip files
-    const hasZipFiles = Array.from(droppedFiles).some(file => 
-      file.name.toLowerCase().endsWith('.zip') || 
-      file.type === 'application/zip' || 
-      file.type === 'application/x-zip-compressed'
-    );
-    
-    if (hasZipFiles) {
-      // Handle zip files directly
-      handleFileUpload(droppedFiles);
-      return;
-    }
-    
-    if (droppedItems && droppedItems.length > 0) {
-      const files = [];
-      const promises = [];
-      
-      for (let i = 0; i < droppedItems.length; i++) {
-        const item = droppedItems[i];
-        if (item.kind === 'file') {
-          const entry = item.webkitGetAsEntry();
-          if (entry) {
-            promises.push(processEntry(entry, ''));
-          }
-        }
-      }
-      
-      Promise.all(promises).then(results => {
-        const allFiles = results.flat().filter(file => {
-          const extension = '.' + file.name.split('.').pop().toLowerCase();
-          return supportedExtensions.includes(extension);
-        });
+      // Try to break at a logical point (end of line, function, etc.)
+      if (chunkEnd < content.length) {
+        const lastNewlineIndex = content.lastIndexOf('\n', chunkEnd);
+        const lastFunctionEnd = content.lastIndexOf('}', chunkEnd);
+        const lastSemicolon = content.lastIndexOf(';', chunkEnd);
         
-        console.log(`Dropped ${allFiles.length} valid files`);
-        setFiles(prevFiles => [...prevFiles, ...allFiles]);
-      });
-    } else {
-      handleFileUpload(droppedFiles);
-    }
-  };
-
-  const processEntry = async (entry, path) => {
-    return new Promise((resolve) => {
-      if (entry.isFile) {
-        entry.file((file) => {
-          const fileWithPath = {
-            ...file,
-            displayPath: path + file.name,
-            fileName: file.name
-          };
-          resolve([fileWithPath]);
-        });
-      } else if (entry.isDirectory) {
-        const dirReader = entry.createReader();
-        dirReader.readEntries((entries) => {
-          const promises = entries.map(subEntry => 
-            processEntry(subEntry, path + entry.name + '/')
-          );
-          Promise.all(promises).then(results => {
-            resolve(results.flat());
-          });
-        });
-      } else {
-        resolve([]);
+        // Use the latest logical break point
+        const breakPoint = Math.max(lastNewlineIndex, lastFunctionEnd, lastSemicolon);
+        if (breakPoint > currentPosition + OVERLAP_SIZE) {
+          chunkEnd = breakPoint + 1;
+        }
       }
-    });
-  };
 
-  const handleDragOver = (e) => {
-    e.preventDefault();
-  };
+      let chunkContent = content.slice(currentPosition, chunkEnd);
+      
+      // Add context from previous chunk if not the first chunk
+      if (chunkIndex > 0 && currentPosition >= OVERLAP_SIZE) {
+        const contextStart = Math.max(0, currentPosition - OVERLAP_SIZE);
+        const context = content.slice(contextStart, currentPosition);
+        chunkContent = `/* Previous context for continuity:\n${context}\n*/\n\n${chunkContent}`;
+      }
 
-  const removeFile = (index) => {
-    const fileToRemove = files[index];
-    setFiles(files.filter((_, i) => i !== index));
-    const newResults = { ...analysisResults };
-    delete newResults[fileToRemove.displayPath];
-    setAnalysisResults(newResults);
-  };
+      chunks.push({
+        content: chunkContent,
+        chunkIndex: chunkIndex,
+        totalChunks: 0, // Will be set after all chunks are created
+        fileName,
+        startPosition: currentPosition,
+        endPosition: chunkEnd
+      });
 
-  const getFileType = (fileName) => {
-    const extension = fileName.split('.').pop().toLowerCase();
-    const typeMap = {
-      'js': 'javascript', 'jsx': 'javascript', 'ts': 'typescript', 'tsx': 'typescript',
-      'py': 'python', 'pyw': 'python', 'pyc': 'python',  // All Python variants
-      'java': 'java', 'cpp': 'cpp', 'c': 'c', 'cs': 'csharp', 'h': 'c',
-      'php': 'php', 'rb': 'ruby', 'go': 'go', 'rs': 'rust', 'swift': 'swift',
-      'kt': 'kotlin', 'scala': 'scala', 'html': 'html', 'css': 'css',
-      'json': 'json', 'sql': 'sql', 'sh': 'bash', 'yml': 'yaml', 'yaml': 'yaml',
-      'md': 'markdown', 'xml': 'xml', 'toml': 'toml'
-    };
-    console.log(`File type mapping: ${fileName} -> ${extension} -> ${typeMap[extension] || extension}`);
-    return typeMap[extension] || extension;
-  };
-
-  const analyzeCode = async (fileContent, fileName, fileType) => {
-    console.log(`\n=== AI ANALYSIS DEBUG ===`);
-    console.log(`Starting analysis for: ${fileName}`);
-    console.log(`File type: ${fileType}`);
-    console.log(`Content length: ${fileContent.length}`);
-
-    let truncatedContent = fileContent;
-    const maxContentLength = 8000;
-    if (fileContent.length > maxContentLength) {
-      truncatedContent = fileContent.substring(0, maxContentLength) + '\n\n// ... (file truncated for analysis - showing first ' + maxContentLength + ' characters)';
-      console.log(`File truncated from ${fileContent.length} to ${truncatedContent.length} characters`);
+      currentPosition = chunkEnd;
+      chunkIndex++;
     }
 
-    let prompt = `
-You are a comprehensive code analyzer. Analyze the following ${fileType} code and provide a detailed JSON response with improvements, fixes, and suggestions.
+    // Set total chunks for all chunks
+    chunks.forEach(chunk => chunk.totalChunks = chunks.length);
+    
+    return chunks;
+  };
 
-File: ${fileName}
-Code:
-\`\`\`${fileType}
-${truncatedContent}
+  // Function to detect if content should be chunked based on complexity
+  const shouldChunk = (content) => {
+    // Check file size
+    if (content.length > MAX_CHUNK_SIZE) return true;
+    
+    // Check complexity indicators
+    const lineCount = content.split('\n').length;
+    const functionCount = (content.match(/function\s+\w+|=>\s*{|class\s+\w+/g) || []).length;
+    const complexityScore = lineCount + (functionCount * 10);
+    
+    return complexityScore > 1000; // Arbitrary complexity threshold
+  };
+
+  // Enhanced analysis function with chunking support
+  const analyzeChunk = async (chunk, analysisType = 'individual') => {
+    const { content, chunkIndex, totalChunks, fileName } = chunk;
+    
+    const prompt = `
+Analyze this ${totalChunks > 1 ? `code chunk (${chunkIndex + 1}/${totalChunks})` : 'code'} from file: ${fileName}
+
+${totalChunks > 1 ? `
+Note: This is part ${chunkIndex + 1} of ${totalChunks} chunks from a larger file. 
+Please consider that there may be dependencies and context in other chunks.
+Focus on issues visible in this section while noting potential cross-chunk dependencies.
+` : ''}
+
+Analysis type: ${analysisType}
+
+Code to analyze:
+\`\`\`
+${content}
 \`\`\`
 
-Provide your analysis in the following JSON format:
+Please provide analysis focusing on:
+1. Code quality and best practices
+2. Potential bugs and security vulnerabilities  
+3. Performance optimization opportunities
+4. Maintainability and readability issues
+${totalChunks > 1 ? '5. Cross-chunk dependencies that may need attention' : ''}
+
+Format your response as JSON with the following structure:
 {
-  "errors": [
-    {"line": number, "type": "error_type", "description": "description", "fix": "suggested_fix"}
+  "chunkInfo": {
+    "fileName": "${fileName}",
+    "chunkIndex": ${chunkIndex},
+    "totalChunks": ${totalChunks}
+  },
+  "issues": [
+    {
+      "type": "error|warning|suggestion",
+      "category": "bug|security|performance|style|maintainability",
+      "description": "Issue description",
+      "lineNumber": "estimated line number if applicable",
+      "severity": "high|medium|low",
+      "suggestion": "How to fix this issue"
+    }
   ],
-  "warnings": [
-    {"line": number, "type": "warning_type", "description": "description", "suggestion": "suggestion"}
-  ],
-  "improvements": [
-    {"type": "improvement_type", "description": "description", "before": "old_code", "after": "new_code"}
-  ],
-  "optimizations": [
-    {"type": "optimization_type", "description": "description", "impact": "performance_impact"}
-  ],
-  "security": [
-    {"vulnerability": "vulnerability_type", "severity": "high|medium|low", "description": "description", "fix": "fix"}
-  ],
-  "suggestions": [
-    {"category": "category", "suggestion": "suggestion", "benefit": "benefit"}
-  ],
-  "improvedCode": "complete_improved_version_of_the_code",
-  "qualityScore": number_out_of_100,
-  "complexity": "low|medium|high",
-  "maintainability": "poor|fair|good|excellent"
+  "summary": "Overall assessment of this code chunk",
+  "crossChunkNotes": "Dependencies or issues that span multiple chunks (if applicable)"
 }
-
-Focus on:
-1. Syntax errors and logical bugs
-2. Performance optimizations
-3. Security vulnerabilities
-4. Code style and best practices
-5. Modern language features and patterns
-6. Error handling improvements
-7. Documentation and readability
-
-Your entire response must be valid JSON only. Do not include any text outside the JSON structure. Keep strings concise to avoid truncation.
 `;
 
-    const maxRetries = 3;
-    let lastError = null;
-    
-    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      const response = await fetch('https://api.anthropic.com/v1/messages', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-api-key': apiKey,
+          'anthropic-version': '2023-06-01'
+        },
+        body: JSON.stringify({
+          model: 'claude-3-sonnet-20240229',
+          max_tokens: 4000,
+          messages: [{ role: 'user', content: prompt }]
+        })
+      });
+
+      if (!response.ok) {
+        throw new Error(`API request failed: ${response.status}`);
+      }
+
+      const data = await response.json();
+      const analysisText = data.content[0].text;
+      
       try {
-        console.log(`Attempt ${attempt}/${maxRetries} - Sending request to Claude API...`);
-        
-        if (attempt > 1) {
-          const delay = Math.pow(2, attempt - 1) * 1000;
-          console.log(`Waiting ${delay}ms before retry...`);
-          await new Promise(resolve => setTimeout(resolve, delay));
-        }
-        
-        const currentApiKey = apiKey || config.apiKey;
-        if (!currentApiKey) {
-          throw new Error('API key not configured. Please add your Anthropic API key in the settings.');
-        }
-        
-        const response = await fetch(config.apiEndpoint, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "x-api-key": currentApiKey,
-            "anthropic-version": "2023-06-01"
-          },
-          body: JSON.stringify({
-            model: config.model,
-            max_tokens: config.maxTokens,
-            messages: [{ role: "user", content: prompt }]
-          })
-        });
+        // Try to parse as JSON, fallback to text if it fails
+        const analysisData = JSON.parse(analysisText);
+        return analysisData;
+      } catch (parseError) {
+        // If JSON parsing fails, return structured text response
+        return {
+          chunkInfo: { fileName, chunkIndex, totalChunks },
+          issues: [],
+          summary: analysisText,
+          crossChunkNotes: '',
+          parseError: true
+        };
+      }
+    } catch (error) {
+      console.error('Analysis error:', error);
+      return {
+        chunkInfo: { fileName, chunkIndex, totalChunks },
+        error: error.message,
+        issues: [],
+        summary: 'Analysis failed',
+        crossChunkNotes: ''
+      };
+    }
+  };
 
-        console.log(`API Response status: ${response.status}`);
-        
-        if (response.status === 503) {
-          console.log(`API temporarily unavailable (503). Attempt ${attempt}/${maxRetries}`);
-          lastError = new Error(`API temporarily overloaded (attempt ${attempt}/${maxRetries})`);
-          if (attempt < maxRetries) {
-            continue;
-          } else {
-            throw new Error(`API is currently overloaded. Please try again in a few minutes. (503 Service Unavailable after ${maxRetries} attempts)`);
-          }
-        }
-        
-        if (response.status === 429) {
-          console.log(`Rate limited (429). Attempt ${attempt}/${maxRetries}`);
-          lastError = new Error(`Rate limited (attempt ${attempt}/${maxRetries})`);
-          if (attempt < maxRetries) {
-            continue;
-          } else {
-            throw new Error(`Rate limit exceeded. Please wait a moment and try again. (429 Too Many Requests after ${maxRetries} attempts)`);
-          }
-        }
-        
-        if (!response.ok) {
-          const errorText = await response.text();
-          console.error(`API request failed with status: ${response.status} - ${errorText}`);
-          throw new Error(`Analysis failed: ${response.status} - ${errorText}`);
-        }
+  // Function to merge analysis results from multiple chunks
+  const mergeAnalysisResults = (chunkResults, fileName) => {
+    const allIssues = [];
+    const summaries = [];
+    const crossChunkNotes = [];
+    let hasErrors = false;
 
-        const data = await response.json();
-        console.log(`Raw API response:`, data);
-        
-        let responseText = data.content[0].text;
-        console.log(`Response text length: ${responseText.length}`);
-        console.log(`Raw response text:`, responseText);
-        
-        responseText = responseText.trim();
-        responseText = responseText.replace(/```json\s*/gi, "").replace(/```\s*/g, "").trim();
-        
-        const firstBrace = responseText.indexOf('{');
-        if (firstBrace > 0) {
-          responseText = responseText.substring(firstBrace);
-          console.log(`Trimmed to start at first brace:`, responseText.substring(0, 200));
-        }
-        
-        const lastBrace = responseText.lastIndexOf('}');
-        if (lastBrace > 0 && lastBrace < responseText.length - 1) {
-          responseText = responseText.substring(0, lastBrace + 1);
-          console.log(`Trimmed to end at last brace:`, responseText.substring(-200));
-        }
-        
-        console.log(`Final cleaned response:`, responseText.substring(0, 500));
-        
-        let parsedResult;
-        try {
-          parsedResult = JSON.parse(responseText);
-          console.log(`Successfully parsed JSON result`);
-          return parsedResult;
-        } catch (parseError) {
-          console.error(`JSON parse error:`, parseError);
-          console.error(`Failed to parse this text:`, responseText);
-          
-          if (responseText.includes('"improvedCode":') && !responseText.endsWith('}')) {
-            console.log(`Attempting to repair truncated JSON...`);
-            let repairedJson = responseText;
-            
-            const lastQuote = repairedJson.lastIndexOf('"');
-            const lastBrace = repairedJson.lastIndexOf('}');
-            
-            if (lastQuote > lastBrace) {
-              repairedJson = repairedJson.substring(0, lastQuote + 1);
-              
-              if (!repairedJson.includes('"qualityScore":')) {
-                repairedJson += ',"qualityScore":75,"complexity":"medium","maintainability":"fair"';
-              }
-              
-              if (!repairedJson.endsWith('}')) {
-                repairedJson += '}';
-              }
-              
-              console.log(`Repaired JSON preview:`, repairedJson.substring(-200));
-              
-              try {
-                parsedResult = JSON.parse(repairedJson);
-                console.log(`Successfully parsed repaired JSON!`);
-                return parsedResult;
-              } catch (repairError) {
-                console.error(`Repair attempt failed:`, repairError);
-              }
-            }
-          }
-          
-          if (attempt < maxRetries) {
-            console.log(`JSON parsing failed, retrying with shorter prompt...`);
-            lastError = new Error(`JSON parsing failed: ${parseError.message}`);
-            
-            if (attempt === maxRetries - 1) {
-              prompt = `
-Analyze this ${fileType} code and return ONLY a short JSON response (under 3000 characters):
+    chunkResults.forEach(result => {
+      if (result.error) {
+        hasErrors = true;
+        return;
+      }
+      
+      if (result.issues) {
+        allIssues.push(...result.issues);
+      }
+      
+      if (result.summary) {
+        summaries.push(`Chunk ${result.chunkInfo.chunkIndex + 1}: ${result.summary}`);
+      }
+      
+      if (result.crossChunkNotes) {
+        crossChunkNotes.push(result.crossChunkNotes);
+      }
+    });
 
-\`\`\`${fileType}
-${fileContent.substring(0, 1000)}${fileContent.length > 1000 ? '\n// ... (truncated for analysis)' : ''}
-\`\`\`
+    // Group issues by category
+    const issuesByCategory = allIssues.reduce((acc, issue) => {
+      const category = issue.category || 'general';
+      if (!acc[category]) acc[category] = [];
+      acc[category].push(issue);
+      return acc;
+    }, {});
 
-Return only this JSON structure:
-{
-  "errors": [{"line": 0, "type": "type", "description": "desc", "fix": "fix"}],
-  "warnings": [],
-  "improvements": [{"type": "type", "description": "short desc", "before": "old", "after": "new"}],
-  "optimizations": [],
-  "security": [],
-  "suggestions": [{"category": "cat", "suggestion": "suggestion", "benefit": "benefit"}],
-  "improvedCode": "improved version of the code",
-  "qualityScore": 75,
-  "complexity": "medium",
-  "maintainability": "fair"
-}
+    // Calculate overall scores
+    const totalIssues = allIssues.length;
+    const highSeverityIssues = allIssues.filter(i => i.severity === 'high').length;
+    const securityIssues = allIssues.filter(i => i.category === 'security').length;
 
-Keep all strings short and do not include long code blocks in the response.
-`;
-              console.log(`Using shortened prompt for final retry`);
-            }
-            
-            continue;
-          }
-          
-          return {
-            errors: [{"line": 0, "type": "json_parse_error", "description": `JSON parsing failed: ${parseError.message}`, "fix": "API response was malformed - try analyzing a smaller file or simpler code"}],
-            warnings: [{"line": 0, "type": "response_warning", "description": "Analysis may be incomplete due to parsing issues", "suggestion": "Try analyzing again with simpler code"}],
-            improvements: [],
-            optimizations: [],
-            security: [],
-            suggestions: [{"category": "technical", "suggestion": "Break large files into smaller pieces for better analysis", "benefit": "More reliable analysis results"}],
-            improvedCode: fileContent,
-            qualityScore: 50,
-            complexity: "unknown",
-            maintainability: "unknown"
-          };
-        }
+    return {
+      fileName,
+      totalChunks: chunkResults.length,
+      hasErrors,
+      overallSummary: {
+        totalIssues,
+        highSeverityIssues,
+        securityIssues,
+        issuesByCategory
+      },
+      chunkSummaries: summaries,
+      crossChunkNotes: crossChunkNotes.filter(note => note.trim()),
+      allIssues,
+      recommendations: generateRecommendations(allIssues, crossChunkNotes)
+    };
+  };
+
+  // Generate recommendations based on analysis results
+  const generateRecommendations = (issues, crossChunkNotes) => {
+    const recommendations = [];
+    
+    const highSeverityIssues = issues.filter(i => i.severity === 'high');
+    if (highSeverityIssues.length > 0) {
+      recommendations.push({
+        priority: 'high',
+        action: 'Address high-severity issues first',
+        details: `Found ${highSeverityIssues.length} high-severity issues that need immediate attention.`
+      });
+    }
+
+    const securityIssues = issues.filter(i => i.category === 'security');
+    if (securityIssues.length > 0) {
+      recommendations.push({
+        priority: 'high',
+        action: 'Review security vulnerabilities',
+        details: `Found ${securityIssues.length} potential security issues.`
+      });
+    }
+
+    if (crossChunkNotes.length > 0) {
+      recommendations.push({
+        priority: 'medium',
+        action: 'Review cross-file dependencies',
+        details: 'Some issues may span multiple parts of the codebase. Consider holistic code review.'
+      });
+    }
+
+    return recommendations;
+  };
+
+  // Main analysis function that handles chunking
+  const analyzeFiles = async () => {
+    if (!apiKey) {
+      alert('Please set your Anthropic API key first');
+      return;
+    }
+
+    if (apiKeyValid === false) {
+      alert('Please enter a valid API key before analyzing');
+      return;
+    }
+
+    if (files.length === 0) {
+      alert('Please select files to analyze');
+      return;
+    }
+
+    if (emailResults && !userEmail) {
+      alert('Please enter your email address to receive results');
+      return;
+    }
+
+    // Validate API key if not already validated
+    if (apiKeyValid === null) {
+      setApiKeyValidating(true);
+      const validation = await validateApiKey(apiKey);
+      setApiKeyValidating(false);
+      
+      if (!validation.valid) {
+        alert(`API Key Invalid: ${validation.error}`);
+        setApiKeyValid(false);
+        return;
+      }
+      setApiKeyValid(true);
+    }
+
+    setLoading(true);
+    setAnalysisResults([]);
+
+    try {
+      const results = [];
+
+      for (const file of files) {
+        const content = await readFileContent(file);
         
-      } catch (error) {
-        console.error(`Attempt ${attempt} failed:`, error);
-        lastError = error;
-        
-        if (attempt < maxRetries) {
-          console.log(`Retrying in a moment...`);
+        // Check if file is too large
+        if (content.length > MAX_FILE_SIZE) {
+          results.push({
+            fileName: file.name,
+            error: `File too large (${content.length} characters). Maximum size is ${MAX_FILE_SIZE} characters.`,
+            skipped: true
+          });
           continue;
         }
-      }
-    }
-    
-    console.error("All retry attempts failed. Last error:", lastError);
-    return {
-      errors: [{"line": 0, "type": "api_error", "description": `Failed to analyze code: ${lastError.message}`, "fix": "Try again in a few minutes. The AI service may be temporarily busy."}],
-      warnings: [{"line": 0, "type": "service_warning", "description": "Analysis service temporarily unavailable", "suggestion": "Please try again later"}],
-      improvements: [],
-      optimizations: [],
-      security: [],
-      suggestions: [{"category": "retry", "suggestion": "Wait a few minutes and try analyzing again", "benefit": "Service availability typically improves quickly"}],
-      improvedCode: fileContent,
-      qualityScore: 0,
-      complexity: "unknown",
-      maintainability: "unknown"
-    };
-  };
 
-  // Individual file analysis only
-  const runIndividualAnalysis = async () => {
-    setAnalysisMode('single');
-    await analyzeAllFiles();
-  };
-
-  // System analysis (includes individual files first)
-  const runSystemAnalysis = async () => {
-    setAnalysisMode('whole');
-    await analyzeAllFiles();
-    // analyzeSystemArchitecture will be called automatically after analyzeAllFiles
-  };
-
-  // Error-focused analysis (includes individual files first)
-  const runErrorFocus = async () => {
-    setAnalysisMode('errors');
-    await analyzeAllFiles();
-  };
-
-  // Business report (includes individual files, system analysis, then report)
-  const runBusinessReport = async () => {
-    setAnalysisMode('report');
-    await analyzeAllFiles();
-    // System analysis and report generation will be called automatically
-  };
-
-  // Complete analysis (all steps)
-  const runCompleteAnalysis = async () => {
-    setAnalysisMode('whole');
-    await analyzeAllFiles();
-    // All subsequent steps will be called automatically
-  };
-
-  const analyzeAllFiles = async () => {
-    if (files.length === 0) return;
-
-    setAnalyzing(true);
-    setAnalysisResults({});
-    setSystemAnalysis(null);
-    setPlainEnglishReport(null);
-    setApiStatus({ hasIssues: false, message: '', type: '' });
-    
-    let hasApiIssues = false;
-    
-    for (let i = 0; i < files.length; i++) {
-      const file = files[i];
-      const displayName = file.displayPath || file.name;
-      setCurrentAnalysis(`Analyzing individual files: ${displayName}... (${i + 1}/${files.length})`);
-      
-      try {
-        console.log(`\n=== ANALYZING FILE ===`);
-        console.log(`File: ${displayName}`);
-        console.log(`File size: ${file.size} bytes`);
-        console.log(`File type detected: ${file.type}`);
-        
-        const content = await file.text();
-        console.log(`Content length: ${content.length} characters`);
-        console.log(`Content preview (first 200 chars):`, content.substring(0, 200));
-        console.log(`Content seems to be text: ${content.length > 0 && !content.includes('\0')}`);
-        
-        const fileType = getFileType(file.fileName || file.name);
-        console.log(`Mapped file type for analysis: ${fileType}`);
-        
-        if (content.length === 0) {
-          throw new Error('File appears to be empty');
-        }
-        
-        if (content.includes('\0')) {
-          throw new Error('File appears to be binary, not text');
-        }
-        
-        console.log(`Starting AI analysis...`);
-        const result = await analyzeCode(content, displayName, fileType);
-        console.log(`Analysis completed successfully`);
-        
-        if (result.errors?.some(error => error.type === 'api_error')) {
-          hasApiIssues = true;
-        }
-        
-        setAnalysisResults(prev => ({
-          ...prev,
-          [displayName]: {
-            ...result,
-            originalCode: content,
-            fileType: fileType,
-            wasTruncated: content.length > 8000
+        // Determine if chunking is needed
+        if (shouldChunk(content)) {
+          console.log(`Chunking file: ${file.name} (${content.length} characters)`);
+          
+          // Create chunks
+          const chunks = chunkContent(content, file.name);
+          console.log(`Created ${chunks.length} chunks for ${file.name}`);
+          
+          // Analyze each chunk
+          const chunkResults = [];
+          for (const chunk of chunks) {
+            console.log(`Analyzing chunk ${chunk.chunkIndex + 1}/${chunk.totalChunks} of ${file.name}`);
+            const chunkResult = await analyzeChunk(chunk, analysisMode);
+            chunkResults.push(chunkResult);
           }
-        }));
-      } catch (error) {
-        console.error(`Error analyzing ${displayName}:`, error);
-        hasApiIssues = true;
-        setAnalysisResults(prev => ({
-          ...prev,
-          [displayName]: {
-            errors: [{"line": 0, "type": "read_error", "description": "Could not read file", "fix": "Ensure file is valid text"}],
-            warnings: [], improvements: [], optimizations: [], security: [], suggestions: [],
-            improvedCode: "", qualityScore: 0, complexity: "unknown", maintainability: "unknown",
-            originalCode: "", fileType: getFileType(file.fileName || file.name)
-          }
-        }));
+          
+          // Merge results
+          const mergedResult = mergeAnalysisResults(chunkResults, file.name);
+          results.push(mergedResult);
+        } else {
+          // Analyze as single chunk
+          console.log(`Analyzing single file: ${file.name}`);
+          const singleChunk = { 
+            content, 
+            chunkIndex: 0, 
+            totalChunks: 1, 
+            fileName: file.name 
+          };
+          const result = await analyzeChunk(singleChunk, analysisMode);
+          results.push(result);
+        }
       }
+
+      setAnalysisResults(results);
+
+      // Send email if requested
+      if (emailResults && userEmail) {
+        const emailSent = await sendAnalysisEmail(results, userEmail);
+        if (emailSent) {
+          alert('Analysis complete! Results have been sent to your email.');
+        } else {
+          alert('Analysis complete! Results displayed below. (Email sending failed)');
+        }
+      }
+
+    } catch (error) {
+      console.error('Analysis failed:', error);
+      alert(`Analysis failed: ${error.message}`);
+    } finally {
+      setLoading(false);
     }
-    
-    if (hasApiIssues) {
-      setApiStatus({
-        hasIssues: true,
-        message: 'The AI analysis service was temporarily busy during some file analysis. You can try re-analyzing specific files or the whole project.',
-        type: 'warning'
-      });
+  };
+
+  // Helper function to read file content
+  const readFileContent = (file) => {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = (e) => resolve(e.target.result);
+      reader.onerror = (e) => reject(e);
+      reader.readAsText(file);
+    });
+  };
+
+  // File selection handlers
+  const handleFileSelect = (event) => {
+    const selectedFiles = Array.from(event.target.files);
+    setFiles(selectedFiles);
+  };
+
+  const handleDrop = useCallback((event) => {
+    event.preventDefault();
+    const droppedFiles = Array.from(event.dataTransfer.files);
+    setFiles(droppedFiles);
+  }, []);
+
+  const handleDragOver = useCallback((event) => {
+    event.preventDefault();
+  }, []);
+
+  // API key management
+  const saveApiKey = async () => {
+    if (!apiKey) {
+      alert('Please enter an API key');
+      return;
     }
-    
-    setAnalyzing(false);
-    setCurrentAnalysis('');
-    
-    // Only continue to system analysis if mode requires it
-    if (analysisMode === 'whole' || analysisMode === 'report') {
-      setTimeout(() => {
-        analyzeSystemArchitecture();
-      }, 1000);
+
+    // Validate API key before saving
+    setApiKeyValidating(true);
+    const validation = await validateApiKey(apiKey);
+    setApiKeyValidating(false);
+
+    if (validation.valid) {
+      localStorage.setItem('anthropic_api_key', apiKey);
+      setApiKeyValid(true);
+      alert('API key validated and saved successfully!');
     } else {
-      // For individual file analysis, make sure we're showing the results
-      if (analysisMode !== 'single' && analysisMode !== 'errors') {
-        setAnalysisMode('single'); // Default to showing individual file results
-      }
+      setApiKeyValid(false);
+      alert(`API key validation failed: ${validation.error}`);
     }
   };
 
-  const analyzeSystemArchitecture = async () => {
-    if (Object.keys(analysisResults).length === 0) return;
-
-    setAnalyzingSystem(true);
-    setCurrentAnalysis('Analyzing system architecture and file relationships...');
-
-    try {
-      console.log(`\n=== SYSTEM ANALYSIS DEBUG ===`);
-      console.log(`Number of files to analyze: ${Object.keys(analysisResults).length}`);
-      
-      const fileData = Object.entries(analysisResults).map(([filePath, result]) => {
-        console.log(`Preparing file: ${filePath}, Content length: ${result.originalCode?.length || 0}`);
-        return {
-          path: filePath,
-          content: result.originalCode || '',
-          fileType: result.fileType || 'unknown',
-          individualAnalysis: {
-            qualityScore: result.qualityScore || 0,
-            complexity: result.complexity || 'unknown',
-            errors: result.errors?.length || 0,
-            warnings: result.warnings?.length || 0,
-            security: result.security?.length || 0
-          }
-        };
-      });
-
-      console.log(`Prepared ${fileData.length} files for system analysis`);
-
-      const limitedFileData = fileData.map(file => ({
-        ...file,
-        content: file.content.length > 3000 ? file.content.substring(0, 3000) + '\n// ... (truncated for analysis)' : file.content
-      }));
-
-      const systemPrompt = `
-You are an expert software architect analyzing a complete codebase. Examine all files together to understand the system architecture, workflows, dependencies, and relationships.
-
-FILES IN CODEBASE (${limitedFileData.length} files):
-${limitedFileData.map(file => `
-File: ${file.path} (${file.fileType})
-Quality Score: ${file.individualAnalysis.qualityScore}/100
-Errors: ${file.individualAnalysis.errors}, Warnings: ${file.individualAnalysis.warnings}, Security Issues: ${file.individualAnalysis.security}
-
-Content:
-\`\`\`${file.fileType}
-${file.content}
-\`\`\`
-`).join('\n')}
-
-Analyze this codebase as a complete system and provide a comprehensive JSON response:
-
-{
-  "architecture": {
-    "pattern": "architecture_pattern_used",
-    "description": "overall_architecture_description",
-    "strengths": ["strength1", "strength2"],
-    "weaknesses": ["weakness1", "weakness2"]
-  },
-  "dependencies": [
-    {"from": "file1", "to": "file2", "type": "import|function_call|data_flow", "description": "relationship_description"}
-  ],
-  "workflow": {
-    "entryPoints": ["main_files"],
-    "dataFlow": "description_of_data_flow_through_system",
-    "executionPath": "typical_execution_path"
-  },
-  "codeOrganization": {
-    "structure": "how_code_is_organized",
-    "separation": "separation_of_concerns_analysis",
-    "modularity": "low|medium|high",
-    "reusability": "poor|fair|good|excellent"
-  },
-  "crossFileIssues": [
-    {"type": "issue_type", "description": "description", "files": ["affected_files"], "impact": "impact", "solution": "recommended_solution"}
-  ],
-  "systemSuggestions": [
-    {"category": "refactoring|architecture|performance|security|maintainability", "suggestion": "suggestion", "benefit": "benefit", "effort": "low|medium|high"}
-  ],
-  "missingComponents": [
-    {"component": "missing_component", "purpose": "why_needed", "priority": "low|medium|high"}
-  ],
-  "overallAssessment": {
-    "maintainability": "poor|fair|good|excellent",
-    "scalability": "poor|fair|good|excellent", 
-    "testability": "poor|fair|good|excellent",
-    "security": "poor|fair|good|excellent",
-    "performance": "poor|fair|good|excellent",
-    "systemScore": 75
-  },
-  "refactoringPriorities": [
-    {"priority": "high|medium|low", "task": "refactoring_task", "reason": "why_important", "estimatedEffort": "time_estimate"}
-  ]
-}
-
-Focus on:
-1. How files interact and depend on each other
-2. Overall system architecture and design patterns
-3. Data flow and execution paths through the system
-4. Cross-file code duplication and inconsistencies
-5. System-level security and performance issues
-6. Opportunities for architectural improvements
-7. Missing abstractions or components
-8. Workflow optimization opportunities
-
-Your entire response must be valid JSON only. Do not include any text outside the JSON structure.
-`;
-
-      console.log(`System prompt length: ${systemPrompt.length} characters`);
-      console.log(`Sending system analysis request...`);
-
-      const currentApiKey = apiKey || config.apiKey;
-      if (!currentApiKey) {
-        throw new Error('API key not configured. Please add your Anthropic API key in the settings.');
-      }
-      
-      const response = await fetch(config.apiEndpoint, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "x-api-key": currentApiKey,
-          "anthropic-version": "2023-06-01"
-        },
-        body: JSON.stringify({
-          model: config.model,
-          max_tokens: config.maxTokens,
-          messages: [{ role: "user", content: systemPrompt }]
-        })
-      });
-
-      console.log(`System analysis response status: ${response.status}`);
-
-      if (!response.ok) {
-        const errorText = await response.text();
-        console.error(`System analysis API error: ${response.status} - ${errorText}`);
-        throw new Error(`System analysis failed: ${response.status} - ${errorText}`);
-      }
-
-      const data = await response.json();
-      console.log(`System analysis raw response:`, data);
-      
-      let responseText = data.content[0].text;
-      console.log(`System response text length: ${responseText.length}`);
-      console.log(`System response preview:`, responseText.substring(0, 500));
-      
-      responseText = responseText.trim();
-      responseText = responseText.replace(/```json\s*/gi, "").replace(/```\s*/g, "").trim();
-      
-      const firstBrace = responseText.indexOf('{');
-      if (firstBrace > 0) {
-        responseText = responseText.substring(firstBrace);
-      }
-      
-      const lastBrace = responseText.lastIndexOf('}');
-      if (lastBrace > 0 && lastBrace < responseText.length - 1) {
-        responseText = responseText.substring(0, lastBrace + 1);
-      }
-      
-      console.log(`Cleaned system response preview:`, responseText.substring(0, 500));
-      
-      let systemResult;
-      try {
-        systemResult = JSON.parse(responseText);
-        console.log(`Successfully parsed system analysis JSON`);
-      } catch (parseError) {
-        console.error(`System analysis JSON parse error:`, parseError);
-        console.error(`Failed to parse this text:`, responseText);
-        throw new Error(`JSON parsing failed: ${parseError.message}`);
-      }
-      
-      setSystemAnalysis(systemResult);
-      
-    } catch (error) {
-      console.error("System analysis error details:", error);
-      console.error("Error stack:", error.stack);
-      
-      // Don't set a fake systemAnalysis object - leave it null to indicate failure
-      // Instead, switch to showing individual file results so user sees something useful
-      setAnalysisMode('single');
-      
-      // Set an API status to indicate the system analysis failed
-      setApiStatus({
-        hasIssues: true,
-        message: `System analysis failed: ${error.message}. Your individual file analysis completed successfully - click "Individual Files" to see those results.`,
-        type: 'warning'
-      });
-    }
-
-    setAnalyzingSystem(false);
-    setCurrentAnalysis('');
-    
-    // Only continue to report generation if mode requires it
-    if (analysisMode === 'report') {
-      setTimeout(() => {
-        generatePlainEnglishReport();
-      }, 1000);
-    } else if (analysisMode === 'whole') {
-      // Make sure we're showing the system analysis results
-      setAnalysisMode('whole');
-    }
+  // Email preferences management
+  const saveEmailPreferences = () => {
+    localStorage.setItem('user_email', userEmail);
+    localStorage.setItem('email_results', emailResults.toString());
+    alert('Email preferences saved!');
   };
 
-  const generatePlainEnglishReport = async (additionalContext = '') => {
-    if (!systemAnalysis || Object.keys(analysisResults).length === 0) return;
-
-    setGeneratingReport(true);
-    setCurrentAnalysis('Generating plain English summary report...');
-
-    try {
-      console.log(`\n=== GENERATING PLAIN ENGLISH REPORT ===`);
-      
-      const totalFiles = Object.keys(analysisResults).length;
-      const totalErrors = Object.values(analysisResults).reduce((sum, result) => sum + (result.errors?.length || 0), 0);
-      const totalWarnings = Object.values(analysisResults).reduce((sum, result) => sum + (result.warnings?.length || 0), 0);
-      const totalSecurity = Object.values(analysisResults).reduce((sum, result) => sum + (result.security?.length || 0), 0);
-      const avgQuality = Object.values(analysisResults).reduce((sum, result) => sum + (result.qualityScore || 0), 0) / totalFiles;
-      
-      const reportPrompt = `
-You are an expert technical communicator who explains complex software issues in simple, business-friendly language. Generate a comprehensive summary report for non-technical stakeholders.
-
-CODEBASE ANALYSIS DATA:
-- Total Files Analyzed: ${totalFiles}
-- Total Critical Errors: ${totalErrors}
-- Total Warnings: ${totalWarnings}
-- Security Issues: ${totalSecurity}
-- Average Code Quality: ${avgQuality.toFixed(1)}/100
-- System Score: ${systemAnalysis.overallAssessment.systemScore}/100
-
-SYSTEM ASSESSMENT:
-- Architecture: ${systemAnalysis.architecture.pattern}
-- Maintainability: ${systemAnalysis.overallAssessment.maintainability}
-- Security: ${systemAnalysis.overallAssessment.security}
-- Performance: ${systemAnalysis.overallAssessment.performance}
-- Scalability: ${systemAnalysis.overallAssessment.scalability}
-
-KEY ISSUES FOUND:
-${Object.entries(analysisResults).map(([file, result]) => `
-File: ${file}
-- Errors: ${result.errors?.length || 0}
-- Security Issues: ${result.security?.length || 0}
-- Quality Score: ${result.qualityScore || 0}/100
-`).join('')}
-
-SYSTEM-LEVEL ISSUES:
-${systemAnalysis.crossFileIssues.map(issue => `- ${issue.description}`).join('\n')}
-
-ADDITIONAL CONTEXT FROM USER:
-${additionalContext || userNotes || 'No additional context provided'}
-
-Create a comprehensive but easy-to-understand report in JSON format:
-
-{
-  "executiveSummary": "2-3 sentence high-level summary of what this code does and its overall health",
-  "whatIsThisCode": {
-    "purpose": "In simple terms, what is this software supposed to do?",
-    "currentState": "How well is it working right now?",
-    "mainComponents": ["list", "of", "key", "parts"]
-  },
-  "keyFindings": {
-    "goodNews": ["positive aspects in simple terms"],
-    "concerns": ["problems that need attention in simple terms"],
-    "urgentIssues": ["critical problems that need immediate attention"]
-  },
-  "businessImpact": {
-    "riskLevel": "Low|Medium|High",
-    "potentialProblems": ["what could go wrong for users/business"],
-    "timeToFix": "estimate in business terms (hours/days/weeks)",
-    "costImplications": "explanation of why this matters financially"
-  },
-  "whatNeedsFixing": [
-    {
-      "issue": "problem in simple terms",
-      "priority": "High|Medium|Low", 
-      "effort": "Easy|Moderate|Complex",
-      "benefit": "why fixing this helps the business",
-      "files": ["which files need work"]
-    }
-  ],
-  "recommendations": {
-    "immediate": ["what to do right now"],
-    "shortTerm": ["what to do in next few weeks"],
-    "longTerm": ["strategic improvements"]
-  },
-  "followUpQuestions": [
-    "What is the main business goal of this software?",
-    "How many users typically use this system?",
-    "Are there any specific performance requirements?",
-    "What's your timeline for improvements?",
-    "Are there budget constraints we should consider?"
-  ],
-  "fileByFileBreakdown": [
-    {
-      "file": "filename",
-      "purpose": "what this file does in simple terms",
-      "issues": ["simple description of problems"],
-      "priority": "High|Medium|Low"
-    }
-  ]
-}
-
-Write in a conversational, helpful tone as if explaining to a business owner or project manager. Avoid technical jargon. Focus on business impact and practical next steps.
-
-Your entire response must be valid JSON only.
-`;
-
-      console.log(`Generating plain English report...`);
-
-      const currentApiKey = apiKey || config.apiKey;
-      if (!currentApiKey) {
-        throw new Error('API key not configured. Please add your Anthropic API key in the settings.');
-      }
-      
-      const response = await fetch(config.apiEndpoint, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "x-api-key": currentApiKey,
-          "anthropic-version": "2023-06-01"
-        },
-        body: JSON.stringify({
-          model: config.model,
-          max_tokens: 4000,
-          messages: [{ role: "user", content: reportPrompt }]
-        })
-      });
-
-      console.log(`Plain English report response status: ${response.status}`);
-
-      if (!response.ok) {
-        const errorText = await response.text();
-        console.error(`Plain English report API error: ${response.status} - ${errorText}`);
-        throw new Error(`Report generation failed: ${response.status}`);
-      }
-
-      const data = await response.json();
-      console.log(`Plain English report raw response:`, data);
-      
-      let responseText = data.content[0].text;
-      console.log(`Plain English response text length: ${responseText.length}`);
-      console.log(`Plain English response preview:`, responseText.substring(0, 500));
-      
-      responseText = responseText.trim();
-      responseText = responseText.replace(/```json\s*/gi, "").replace(/```\s*/g, "").trim();
-      
-      const firstBrace = responseText.indexOf('{');
-      if (firstBrace > 0) {
-        responseText = responseText.substring(firstBrace);
-      }
-      
-      const lastBrace = responseText.lastIndexOf('}');
-      if (lastBrace > 0 && lastBrace < responseText.length - 1) {
-        responseText = responseText.substring(0, lastBrace + 1);
-      }
-      
-      console.log(`Cleaned plain English response preview:`, responseText.substring(0, 500));
-      
-      let reportResult;
-      try {
-        reportResult = JSON.parse(responseText);
-        console.log(`Successfully parsed plain English report`);
-      } catch (parseError) {
-        console.error(`Plain English report JSON parse error:`, parseError);
-        console.error(`Failed to parse this text:`, responseText);
-        throw new Error(`Report JSON parsing failed: ${parseError.message}`);
-      }
-      
-      setPlainEnglishReport(reportResult);
-      setFollowUpQuestions(reportResult.followUpQuestions || []);
-      
-      // Make sure we're showing the report results
-      setAnalysisMode('report');
-      
-    } catch (error) {
-      console.error("Plain English report error:", error);
-      setPlainEnglishReport({
-        executiveSummary: "Unable to generate summary report due to technical issues.",
-        whatIsThisCode: {
-          purpose: "Analysis incomplete",
-          currentState: "Unable to determine",
-          mainComponents: []
-        },
-        keyFindings: {
-          goodNews: [],
-          concerns: ["Report generation failed"],
-          urgentIssues: ["Unable to create plain English summary"]
-        },
-        businessImpact: {
-          riskLevel: "Unknown",
-          potentialProblems: ["Cannot assess due to report generation failure"],
-          timeToFix: "Unknown",
-          costImplications: "Unable to determine"
-        },
-        whatNeedsFixing: [],
-        recommendations: {
-          immediate: ["Try regenerating the report"],
-          shortTerm: [],
-          longTerm: []
-        },
-        followUpQuestions: [],
-        fileByFileBreakdown: []
-      });
-    }
-
-    setGeneratingReport(false);
-    setCurrentAnalysis('');
-  };
-
-  const downloadImprovedFile = (filePath, improvedCode) => {
-    console.log(`\n=== DOWNLOAD DEBUG ===`);
-    console.log(`File path: ${filePath}`);
-    console.log(`Improved code length: ${improvedCode?.length || 0}`);
-    console.log(`Improved code preview:`, improvedCode?.substring(0, 200) || 'No code');
-    
-    if (!improvedCode || improvedCode.length === 0) {
-      alert('No improved code available for this file. The analysis may have failed or no improvements were suggested.');
-      return;
-    }
-    
-    try {
-      const blob = new Blob([improvedCode], { type: 'text/plain' });
-      const url = URL.createObjectURL(blob);
-      
-      const fileName = filePath.split('/').pop() || filePath;
-      const downloadFileName = `improved_${fileName}`;
-      
-      console.log(`Download filename: ${downloadFileName}`);
-      console.log(`Blob size: ${blob.size} bytes`);
-      
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = downloadFileName;
-      a.style.display = 'none';
-      
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      
-      setTimeout(() => URL.revokeObjectURL(url), 100);
-      
-      console.log(`Download initiated successfully`);
-      
-    } catch (error) {
-      console.error('Download error:', error);
-      alert(`Failed to download improved file: ${error.message}`);
-    }
-  };
-
-  const downloadAllImproved = () => {
-    console.log(`\n=== DOWNLOAD ALL DEBUG ===`);
-    const availableFiles = Object.entries(analysisResults).filter(([filePath, result]) => {
-      const hasImprovedCode = result.improvedCode && result.improvedCode.length > 0;
-      const isDifferent = result.improvedCode !== result.originalCode;
-      console.log(`File: ${filePath}, Has improved code: ${hasImprovedCode}, Is different: ${isDifferent}`);
-      return hasImprovedCode && isDifferent;
-    });
-    
-    console.log(`Found ${availableFiles.length} files with improvements`);
-    
-    if (availableFiles.length === 0) {
-      alert('No improved files are available for download. Either the analysis is still running or no improvements were suggested.');
-      return;
-    }
-    
-    let downloadCount = 0;
-    availableFiles.forEach(([filePath, result], index) => {
-      setTimeout(() => {
-        downloadImprovedFile(filePath, result.improvedCode);
-        downloadCount++;
-        if (downloadCount === availableFiles.length) {
-          console.log(`All ${downloadCount} improved files downloaded`);
-        }
-      }, index * 200);
-    });
-  };
-
-  const getQualityColor = (score) => {
-    if (score >= 80) return 'text-green-600';
-    if (score >= 60) return 'text-yellow-600';
-    return 'text-red-600';
-  };
-
-  const getSeverityColor = (severity) => {
-    switch (severity) {
-      case 'high': return 'text-red-600 bg-red-50';
-      case 'medium': return 'text-yellow-600 bg-yellow-50';
-      case 'low': return 'text-blue-600 bg-blue-50';
-      default: return 'text-gray-600 bg-gray-50';
-    }
-  };
-
-  const handleApiKeySubmit = () => {
-    if (apiKey.trim()) {
-      // Update the config with the new API key
-      config.apiKey = apiKey.trim();
-      setShowApiKeyModal(false);
-    }
+  const handleApiKeyChange = (e) => {
+    const newKey = e.target.value;
+    setApiKey(newKey);
+    setApiKeyValid(null); // Reset validation status
   };
 
   return (
-    <div className="max-w-7xl mx-auto p-6 bg-gray-50 min-h-screen">
-      {/* API Key Modal */}
-      {showApiKeyModal && (
-        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-          <div className="bg-white rounded-lg p-6 max-w-md w-full">
-            <h2 className="text-xl font-bold mb-4">Configure API Key</h2>
-            <p className="text-gray-600 mb-4">
-              Enter your Anthropic API key to enable AI analysis. Your key is stored locally and never sent to any server except Anthropic's API.
+    <div className="min-h-screen bg-gray-50 p-6">
+      <div className="max-w-6xl mx-auto">
+        <header className="mb-8">
+          <h1 className="text-3xl font-bold text-gray-900 mb-2">
+            Enhanced Code Analyzer with Chunking
+          </h1>
+          <p className="text-gray-600">
+            Analyze code files of any size with automatic chunking for large files
+          </p>
+        </header>
+
+        {/* Email Configuration Section */}
+        <div className="bg-white rounded-lg shadow-sm p-6 mb-6">
+          <h2 className="text-xl font-semibold mb-4">Email Configuration</h2>
+          <div className="space-y-4">
+            <div>
+              <label className="flex items-center space-x-3">
+                <input
+                  type="checkbox"
+                  checked={emailResults}
+                  onChange={(e) => setEmailResults(e.target.checked)}
+                  className="w-4 h-4 text-blue-600 border-gray-300 rounded focus:ring-blue-500"
+                />
+                <span className="text-sm font-medium text-gray-700">
+                  Email results to me when analysis is complete
+                </span>
+              </label>
+            </div>
+            
+            {emailResults && (
+              <div className="flex gap-3">
+                <input
+                  type="email"
+                  placeholder="Enter your email address"
+                  value={userEmail}
+                  onChange={(e) => setUserEmail(e.target.value)}
+                  className="flex-1 px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  required
+                />
+                <button
+                  onClick={saveEmailPreferences}
+                  className="px-4 py-2 bg-green-600 text-white rounded-md hover:bg-green-700 focus:outline-none focus:ring-2 focus:ring-green-500"
+                >
+                  Save Preferences
+                </button>
+              </div>
+            )}
+            
+            <p className="text-xs text-gray-500">
+              Results will be displayed on screen and optionally emailed to you for easy sharing and record-keeping.
             </p>
-            <input
-              type="password"
-              value={apiKey}
-              onChange={(e) => setApiKey(e.target.value)}
-              placeholder="sk-ant-..."
-              className="w-full px-3 py-2 border border-gray-300 rounded-lg mb-4 focus:outline-none focus:ring-2 focus:ring-blue-500"
-            />
-            <div className="flex gap-2">
+          </div>
+        </div>
+
+        {/* API Key Section */}
+        <div className="bg-white rounded-lg shadow-sm p-6 mb-6">
+          <h2 className="text-xl font-semibold mb-4">API Configuration</h2>
+          <div className="space-y-3">
+            <div className="flex gap-3">
+              <div className="flex-1 relative">
+                <input
+                  type="password"
+                  placeholder="Enter your Anthropic API key (sk-ant-...)"
+                  value={apiKey}
+                  onChange={handleApiKeyChange}
+                  className={`w-full px-3 py-2 border rounded-md focus:outline-none focus:ring-2 ${
+                    apiKeyValid === true ? 'border-green-500 bg-green-50' :
+                    apiKeyValid === false ? 'border-red-500 bg-red-50' :
+                    'border-gray-300'
+                  } ${apiKeyValid === true ? 'focus:ring-green-500' : 
+                       apiKeyValid === false ? 'focus:ring-red-500' : 
+                       'focus:ring-blue-500'}`}
+                />
+                {apiKeyValidating && (
+                  <div className="absolute right-3 top-2.5">
+                    <div className="animate-spin w-5 h-5 border-2 border-blue-500 border-t-transparent rounded-full"></div>
+                  </div>
+                )}
+                {apiKeyValid === true && !apiKeyValidating && (
+                  <div className="absolute right-3 top-2.5 text-green-500">✓</div>
+                )}
+                {apiKeyValid === false && !apiKeyValidating && (
+                  <div className="absolute right-3 top-2.5 text-red-500">✗</div>
+                )}
+              </div>
               <button
-                onClick={handleApiKeySubmit}
-                className="flex-1 bg-blue-600 text-white px-4 py-2 rounded-lg hover:bg-blue-700"
+                onClick={saveApiKey}
+                disabled={apiKeyValidating || !apiKey}
+                className="px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:opacity-50 disabled:cursor-not-allowed"
               >
-                Save API Key
-              </button>
-              <button
-                onClick={() => setShowApiKeyModal(false)}
-                className="flex-1 bg-gray-300 text-gray-700 px-4 py-2 rounded-lg hover:bg-gray-400"
-              >
-                Cancel
+                {apiKeyValidating ? 'Validating...' : 'Validate & Save'}
               </button>
             </div>
-            <p className="text-xs text-gray-500 mt-4">
+            
+            <div className="flex items-center space-x-2 text-sm">
+              {apiKeyValid === true && (
+                <span className="text-green-600">✓ API key is valid and active</span>
+              )}
+              {apiKeyValid === false && (
+                <span className="text-red-600">✗ API key validation failed</span>
+              )}
+              {apiKeyValid === null && apiKey && (
+                <span className="text-gray-500">Click "Validate & Save" to check your API key</span>
+              )}
+            </div>
+            
+            <p className="text-xs text-gray-500">
               Get your API key from <a href="https://console.anthropic.com" target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:underline">console.anthropic.com</a>
             </p>
           </div>
         </div>
-      )}
 
-      <div className="bg-white rounded-lg shadow-lg p-6">
-        <div className="flex justify-between items-start mb-8">
-          <div className="text-center flex-1">
-            <h1 className="text-3xl font-bold text-gray-900 mb-2">
-              Comprehensive Code Analyzer
-            </h1>
-            <p className="text-gray-600">
-              Analyze files, folders, ZIP archives, or GitHub repositories with AI-powered insights and improvements
-            </p>
+        {/* Analysis Mode Selection */}
+        <div className="bg-white rounded-lg shadow-sm p-6 mb-6">
+          <h2 className="text-xl font-semibold mb-4">Analysis Mode</h2>
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+            {[
+              { value: 'individual', label: 'Individual Files', desc: 'Detailed per-file analysis' },
+              { value: 'system', label: 'System Analysis', desc: 'Architecture and relationships' },
+              { value: 'error', label: 'Error Focus', desc: 'Bug detection and fixes' },
+              { value: 'business', label: 'Business Report', desc: 'Non-technical summary' }
+            ].map((mode) => (
+              <label key={mode.value} className="cursor-pointer">
+                <input
+                  type="radio"
+                  name="analysisMode"
+                  value={mode.value}
+                  checked={analysisMode === mode.value}
+                  onChange={(e) => setAnalysisMode(e.target.value)}
+                  className="sr-only"
+                />
+                <div className={`p-4 border-2 rounded-lg ${
+                  analysisMode === mode.value ? 'border-blue-500 bg-blue-50' : 'border-gray-200'
+                }`}>
+                  <div className="font-medium">{mode.label}</div>
+                  <div className="text-sm text-gray-600">{mode.desc}</div>
+                </div>
+              </label>
+            ))}
           </div>
-          <button
-            onClick={() => setShowApiKeyModal(true)}
-            className="bg-gray-100 text-gray-700 px-3 py-2 rounded-lg hover:bg-gray-200 flex items-center gap-2"
-            title={`API Key: ${getMaskedApiKey()}`}
-          >
-            <Key className="h-4 w-4" />
-            <span className="text-sm">API Key</span>
-          </button>
         </div>
 
-        {/* Warning if no API key */}
-        {!isApiKeyConfigured() && !apiKey && (
-          <div className="bg-yellow-50 border border-yellow-200 rounded-lg p-4 mb-6">
-            <div className="flex items-center">
-              <AlertCircle className="h-5 w-5 text-yellow-600 mr-2" />
-              <span className="text-yellow-800">
-                No API key configured. <button onClick={() => setShowApiKeyModal(true)} className="underline font-medium">Add your Anthropic API key</button> to enable AI analysis.
-              </span>
-            </div>
-          </div>
-        )}
-
-        {/* File Upload Area */}
-        <div 
-          className="border-2 border-dashed border-gray-300 rounded-lg p-8 text-center mb-6 hover:border-blue-400 transition-colors"
-          onDrop={handleDrop}
-          onDragOver={handleDragOver}
-        >
-          <Upload className="mx-auto h-12 w-12 text-gray-400 mb-4" />
-          <p className="text-lg font-medium text-gray-700 mb-2">
-            Drop files, folders, or ZIP archives here, or choose an option below
-          </p>
-          <p className="text-sm text-gray-500 mb-4">
-            Supports: Python (.py), JavaScript (.js), TypeScript (.ts), Java, C++, and 25+ more
-          </p>
+        {/* File Upload Section */}
+        <div className="bg-white rounded-lg shadow-sm p-6 mb-6">
+          <h2 className="text-xl font-semibold mb-4">Upload Files</h2>
           
-          {/* Upload Options */}
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
-            <input
-              ref={fileInputRef}
-              type="file"
-              multiple
-              className="hidden"
-              onChange={(e) => handleFileUpload(e.target.files)}
-            />
-            <input
-              ref={folderInputRef}
-              type="file"
-              multiple
-              className="hidden"
-              onChange={(e) => handleFolderUpload(e.target.files)}
-            />
-            <input
-              ref={zipInputRef}
-              type="file"
-              accept=".zip,application/zip,application/x-zip-compressed"
-              className="hidden"
-              onChange={(e) => handleFileUpload(e.target.files)}
-            />
-            
-            <button
-              onClick={() => fileInputRef.current?.click()}
-              className="bg-blue-600 text-white px-4 py-3 rounded-lg hover:bg-blue-700 transition-colors flex items-center justify-center"
-            >
-              <FileText className="h-4 w-4 mr-2" />
-              Select Files
-            </button>
-            
-            <button
-              onClick={() => {
-                console.log('Folder button clicked, webkitdirectory:', folderInputRef.current?.webkitdirectory);
-                folderInputRef.current?.click();
-              }}
-              className="bg-green-600 text-white px-4 py-3 rounded-lg hover:bg-green-700 transition-colors flex items-center justify-center"
-            >
-              <Upload className="h-4 w-4 mr-2" />
-              Select Folder
-            </button>
-            
-            <button
-              onClick={() => zipInputRef.current?.click()}
-              className="bg-purple-600 text-white px-4 py-3 rounded-lg hover:bg-purple-700 transition-colors flex items-center justify-center"
-            >
-              <Archive className="h-4 w-4 mr-2" />
-              Upload ZIP
-            </button>
-            
-            <button
-              onClick={() => document.getElementById('github-input').focus()}
-              className="bg-gray-800 text-white px-4 py-3 rounded-lg hover:bg-gray-900 transition-colors flex items-center justify-center"
-            >
-              <Github className="h-4 w-4 mr-2" />
-              GitHub Repo
-            </button>
-          </div>
-          
-          {/* GitHub Repository Input */}
-          <div className="bg-gray-50 p-4 rounded-lg border max-w-2xl mx-auto">
-            <div className="flex items-center mb-2">
-              <Github className="h-5 w-5 text-gray-600 mr-2" />
-              <label className="text-sm font-medium text-gray-700">Load from GitHub Repository:</label>
-            </div>
-            <div className="flex gap-2">
+          <div
+            className="border-2 border-dashed border-gray-300 rounded-lg p-8 text-center hover:border-gray-400 transition-colors"
+            onDrop={handleDrop}
+            onDragOver={handleDragOver}
+          >
+            <div className="space-y-4">
+              <div className="text-4xl text-gray-400">📁</div>
+              <div>
+                <p className="text-lg font-medium text-gray-900">
+                  Drop files here or click to select
+                </p>
+                <p className="text-sm text-gray-500">
+                  Supports JavaScript, Python, Java, C++, and 25+ languages
+                </p>
+                <p className="text-xs text-gray-400 mt-2">
+                  Large files will be automatically chunked for analysis
+                </p>
+              </div>
               <input
-                id="github-input"
-                type="text"
-                value={githubUrl}
-                onChange={(e) => setGithubUrl(e.target.value)}
-                placeholder="https://github.com/owner/repository"
-                className="flex-1 px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
-                disabled={loadingRepo}
+                ref={fileInputRef}
+                type="file"
+                multiple
+                onChange={handleFileSelect}
+                className="hidden"
+                accept=".js,.jsx,.ts,.tsx,.py,.java,.cpp,.c,.h,.cs,.html,.css,.php,.go,.rs,.rb,.swift,.kt,.scala,.json,.yml,.yaml,.xml,.toml,.md,.sql,.sh"
               />
               <button
-                onClick={handleGithubRepo}
-                disabled={loadingRepo || !githubUrl.trim()}
-                className="bg-gray-800 text-white px-4 py-2 rounded-lg hover:bg-gray-900 disabled:opacity-50 disabled:cursor-not-allowed flex items-center text-sm"
+                onClick={() => fileInputRef.current?.click()}
+                className="px-6 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500"
               >
-                {loadingRepo ? (
-                  <>
-                    <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-white mr-2"></div>
-                    Loading...
-                  </>
-                ) : (
-                  <>
-                    <Link className="h-4 w-4 mr-2" />
-                    Load Repo
-                  </>
-                )}
+                Select Files
               </button>
             </div>
-            <p className="text-xs text-gray-500 mt-2">
-              Enter a public GitHub repository URL to automatically load all code files
-            </p>
           </div>
-        </div>
 
-        {/* File List */}
-        {files.length > 0 && (
-          <div className="mb-6">
-            <h3 className="text-lg font-semibold mb-3">Uploaded Files ({files.length})</h3>
-            <div className="grid grid-cols-1 gap-3">
-              {files.map((file, index) => (
-                <div key={index} className="flex items-center justify-between bg-gray-50 p-3 rounded-lg">
-                  <div className="flex items-center flex-1 min-w-0">
-                    <FileText className="h-5 w-5 text-blue-600 mr-2 flex-shrink-0" />
-                    <div className="min-w-0 flex-1">
-                      <div className="text-sm font-medium truncate">{file.fileName || file.name}</div>
-                      {file.displayPath && (
-                        <div className="text-xs text-gray-500 truncate">{file.displayPath}</div>
-                      )}
+          {files.length > 0 && (
+            <div className="mt-4">
+              <h3 className="font-medium mb-2">Selected Files:</h3>
+              <div className="space-y-2">
+                {files.map((file, index) => (
+                  <div key={index} className="flex items-center justify-between p-3 bg-gray-50 rounded-md">
+                    <div>
+                      <span className="font-medium">{file.name}</span>
+                      <span className="text-sm text-gray-500 ml-2">
+                        ({(file.size / 1024).toFixed(1)} KB)
+                        {file.size > MAX_CHUNK_SIZE && ' - Will be chunked'}
+                      </span>
                     </div>
                   </div>
-                  <button
-                    onClick={() => removeFile(index)}
-                    className="text-red-600 hover:text-red-800 text-sm ml-2 flex-shrink-0"
-                  >
-                    Remove
-                  </button>
-                </div>
-              ))}
-            </div>
-            
-            {/* Analysis Choice Menu - Show immediately after file upload */}
-            {Object.keys(analysisResults).length === 0 && (
-              <div className="bg-gradient-to-r from-blue-50 to-purple-50 border-2 border-blue-200 rounded-lg shadow-lg p-6 mt-6">
-                <h3 className="text-xl font-bold text-gray-900 mb-4">🎯 Choose Your Analysis Type</h3>
-                <p className="text-gray-600 mb-6">Select how you'd like to analyze your code:</p>
-                
-                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
-                  <button
-                    onClick={() => runIndividualAnalysis()}
-                    disabled={analyzing || analyzingSystem || generatingReport || loadingRepo}
-                    className="p-6 rounded-lg border-2 border-blue-300 hover:border-blue-500 hover:bg-blue-50 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-                  >
-                    <div className="text-center">
-                      <div className="text-3xl mb-3">📄</div>
-                      <div className="font-semibold text-lg mb-2">Analyze Individual Files</div>
-                      <div className="text-sm text-gray-600 mb-3">Review each file separately with detailed feedback on errors, improvements, and code quality</div>
-                      <div className="text-xs text-blue-600 font-medium">Best for: Code review, debugging, learning</div>
-                    </div>
-                  </button>
-                  
-                  <button
-                    onClick={() => runSystemAnalysis()}
-                    disabled={analyzing || analyzingSystem || generatingReport || loadingRepo}
-                    className="p-6 rounded-lg border-2 border-green-300 hover:border-green-500 hover:bg-green-50 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-                  >
-                    <div className="text-center">
-                      <div className="text-3xl mb-3">🏗️</div>
-                      <div className="font-semibold text-lg mb-2">Analyze as Complete System</div>
-                      <div className="text-sm text-gray-600 mb-3">Understand architecture, file relationships, and system-wide patterns</div>
-                      <div className="text-xs text-green-600 font-medium">Best for: Architecture review, refactoring</div>
-                    </div>
-                  </button>
-                  
-                  <button
-                    onClick={() => runErrorFocus()}
-                    disabled={analyzing || analyzingSystem || generatingReport || loadingRepo}
-                    className="p-6 rounded-lg border-2 border-red-300 hover:border-red-500 hover:bg-red-50 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-                  >
-                    <div className="text-center">
-                      <div className="text-3xl mb-3">🔧</div>
-                      <div className="font-semibold text-lg mb-2">Focus on Errors & Fixes</div>
-                      <div className="text-sm text-gray-600 mb-3">Identify critical bugs, security issues, and get specific fix recommendations</div>
-                      <div className="text-xs text-red-600 font-medium">Best for: Bug fixing, security audit</div>
-                    </div>
-                  </button>
-                  
-                  <button
-                    onClick={() => runBusinessReport()}
-                    disabled={analyzing || analyzingSystem || generatingReport || loadingRepo}
-                    className="p-6 rounded-lg border-2 border-purple-300 hover:border-purple-500 hover:bg-purple-50 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-                  >
-                    <div className="text-center">
-                      <div className="text-3xl mb-3">📊</div>
-                      <div className="font-semibold text-lg mb-2">Business Summary Report</div>
-                      <div className="text-sm text-gray-600 mb-3">Get a non-technical summary with business impact and recommendations</div>
-                      <div className="text-xs text-purple-600 font-medium">Best for: Stakeholders, project planning</div>
-                    </div>
-                  </button>
-                </div>
-
-                <div className="text-center">
-                  <button
-                    onClick={() => runCompleteAnalysis()}
-                    disabled={analyzing || analyzingSystem || generatingReport || loadingRepo}
-                    className="bg-gradient-to-r from-blue-600 to-purple-600 text-white px-8 py-3 rounded-lg hover:from-blue-700 hover:to-purple-700 disabled:opacity-50 disabled:cursor-not-allowed flex items-center mx-auto text-lg font-semibold"
-                  >
-                    <Play className="h-5 w-5 mr-2" />
-                    Run Complete Analysis (All of the Above)
-                  </button>
-                  <p className="text-sm text-gray-500 mt-2">Analyzes files individually, then as a system, then generates a business report</p>
-                </div>
+                ))}
               </div>
-            )}
-          </div>
-        )}
-
-        {/* Analysis Progress */}
-        {(analyzing || analyzingSystem || generatingReport || loadingRepo || currentAnalysis.includes('Extracting ZIP')) && (
-          <div className="mb-6 bg-blue-50 p-4 rounded-lg">
-            <div className="flex items-center">
-              <div className="animate-spin rounded-full h-6 w-6 border-b-2 border-blue-600 mr-3"></div>
-              <span className="font-medium text-blue-800">
-                {currentAnalysis}
-              </span>
             </div>
-          </div>
-        )}
+          )}
+        </div>
 
-        {/* Basic demo message if no files */}
-        {files.length === 0 && (
-          <div className="text-center py-8">
-            <p className="text-gray-500 mb-4">Upload some code files to get started with AI-powered analysis!</p>
-            <p className="text-sm text-gray-400">This is a demo version - try uploading a small JavaScript or Python file to see the analysis in action.</p>
+        {/* Analysis Button */}
+        <div className="text-center mb-6">
+          <button
+            onClick={analyzeFiles}
+            disabled={loading || files.length === 0 || !apiKey || apiKeyValid === false || apiKeyValidating}
+            className="px-8 py-3 bg-green-600 text-white text-lg font-medium rounded-md hover:bg-green-700 focus:outline-none focus:ring-2 focus:ring-green-500 disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            {loading ? (emailSending ? 'Sending Email...' : 'Analyzing...') : 'Start Analysis'}
+          </button>
+          
+          {(loading || emailSending) && (
+            <div className="mt-3 text-sm text-gray-600">
+              {loading && !emailSending && 'Analyzing your code with Claude AI...'}
+              {emailSending && 'Sending results to your email...'}
+              {emailResults && userEmail && !emailSending && loading && (
+                <div className="mt-1">Results will be emailed to: {userEmail}</div>
+              )}
+            </div>
+          )}
+          
+          {apiKeyValid === false && (
+            <div className="mt-2 text-sm text-red-600">
+              Please enter a valid API key to proceed
+            </div>
+          )}
+        </div>
+
+        {/* Analysis Results */}
+        {analysisResults.length > 0 && (
+          <div className="bg-white rounded-lg shadow-sm p-6">
+            <h2 className="text-2xl font-semibold mb-6">Analysis Results</h2>
+            
+            {analysisResults.map((result, index) => (
+              <div key={index} className="mb-8 border-b pb-6 last:border-b-0">
+                <div className="flex items-center justify-between mb-4">
+                  <h3 className="text-xl font-medium">{result.fileName}</h3>
+                  {result.totalChunks > 1 && (
+                    <span className="px-3 py-1 bg-blue-100 text-blue-800 rounded-full text-sm">
+                      {result.totalChunks} chunks analyzed
+                    </span>
+                  )}
+                </div>
+
+                {result.error ? (
+                  <div className="p-4 bg-red-50 border border-red-200 rounded-md">
+                    <p className="text-red-800">{result.error}</p>
+                  </div>
+                ) : (
+                  <div className="space-y-4">
+                    {/* Overall Summary for chunked files */}
+                    {result.overallSummary && (
+                      <div className="p-4 bg-blue-50 border border-blue-200 rounded-md">
+                        <h4 className="font-medium mb-2">Overall Summary</h4>
+                        <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-sm">
+                          <div>
+                            <span className="font-medium">Total Issues:</span> {result.overallSummary.totalIssues}
+                          </div>
+                          <div>
+                            <span className="font-medium">High Severity:</span> {result.overallSummary.highSeverityIssues}
+                          </div>
+                          <div>
+                            <span className="font-medium">Security:</span> {result.overallSummary.securityIssues}
+                          </div>
+                          <div>
+                            <span className="font-medium">Chunks:</span> {result.totalChunks}
+                          </div>
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Issues */}
+                    {result.allIssues && result.allIssues.length > 0 && (
+                      <div>
+                        <h4 className="font-medium mb-3">Issues Found:</h4>
+                        <div className="space-y-2">
+                          {result.allIssues.map((issue, issueIndex) => (
+                            <div key={issueIndex} className={`p-3 rounded-md border ${
+                              issue.severity === 'high' ? 'bg-red-50 border-red-200' :
+                              issue.severity === 'medium' ? 'bg-yellow-50 border-yellow-200' :
+                              'bg-gray-50 border-gray-200'
+                            }`}>
+                              <div className="flex items-start justify-between">
+                                <div className="flex-1">
+                                  <div className="font-medium">{issue.description}</div>
+                                  {issue.suggestion && (
+                                    <div className="text-sm text-gray-600 mt-1">
+                                      <strong>Suggestion:</strong> {issue.suggestion}
+                                    </div>
+                                  )}
+                                </div>
+                                <div className="flex flex-col items-end text-sm">
+                                  <span className={`px-2 py-1 rounded text-xs ${
+                                    issue.severity === 'high' ? 'bg-red-100 text-red-800' :
+                                    issue.severity === 'medium' ? 'bg-yellow-100 text-yellow-800' :
+                                    'bg-gray-100 text-gray-800'
+                                  }`}>
+                                    {issue.severity}
+                                  </span>
+                                  <span className="text-gray-500 mt-1">{issue.category}</span>
+                                </div>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Recommendations */}
+                    {result.recommendations && result.recommendations.length > 0 && (
+                      <div>
+                        <h4 className="font-medium mb-3">Recommendations:</h4>
+                        <div className="space-y-2">
+                          {result.recommendations.map((rec, recIndex) => (
+                            <div key={recIndex} className="p-3 bg-green-50 border border-green-200 rounded-md">
+                              <div className="font-medium text-green-800">{rec.action}</div>
+                              <div className="text-sm text-green-700">{rec.details}</div>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Cross-chunk Notes */}
+                    {result.crossChunkNotes && result.crossChunkNotes.length > 0 && (
+                      <div>
+                        <h4 className="font-medium mb-3">Cross-Chunk Dependencies:</h4>
+                        <div className="space-y-2">
+                          {result.crossChunkNotes.map((note, noteIndex) => (
+                            <div key={noteIndex} className="p-3 bg-orange-50 border border-orange-200 rounded-md">
+                              <div className="text-sm text-orange-800">{note}</div>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Summary */}
+                    {result.summary && (
+                      <div>
+                        <h4 className="font-medium mb-2">Summary:</h4>
+                        <div className="p-3 bg-gray-50 rounded-md">
+                          <div className="text-sm text-gray-700 whitespace-pre-wrap">{result.summary}</div>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+            ))}
           </div>
         )}
       </div>
@@ -1600,4 +967,4 @@ Your entire response must be valid JSON only.
   );
 };
 
-export default App;
+export default EnhancedCodeAnalyzer;
