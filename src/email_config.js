@@ -1,19 +1,24 @@
 // email-config.js
 // Configuration file for EmailJS integration
-// Copy this file and update with your EmailJS credentials
+// IMPORTANT: Update these values with your actual EmailJS credentials
 
 export const EMAIL_CONFIG = {
   // EmailJS Configuration
   // Get these values from your EmailJS dashboard at https://www.emailjs.com/
   
-  // Your EmailJS User ID (found in Account -> General)
-  USER_ID: "YOUR_EMAILJS_USER_ID", // Replace with your actual User ID
+  // Step 1: Sign up at https://www.emailjs.com/
+  // Step 2: Go to "Email Services" and add your email provider (Gmail, Outlook, etc.)
+  // Step 3: Go to "Email Templates" and create a template
+  // Step 4: Get your credentials from the dashboard
+  
+  // Your EmailJS Public Key (found in Account -> API Keys)
+  USER_ID: "yLhTDLKkKnbvKRvrV", // ✓ Public Key configured
   
   // Your Email Service ID (from Email Services section)
-  SERVICE_ID: "YOUR_EMAIL_SERVICE_ID", // Replace with your Service ID
+  SERVICE_ID: "service_mqwsmjj", // ✓ Service ID configured
   
   // Your Email Template ID (from Email Templates section)
-  TEMPLATE_ID: "YOUR_EMAIL_TEMPLATE_ID", // Replace with your Template ID
+  TEMPLATE_ID: "template_ixy9kul", // ✓ Template ID configured
   
   // Email template variables (these should match your EmailJS template)
   TEMPLATE_VARIABLES: {
@@ -44,6 +49,29 @@ export const EMAIL_CONFIG = {
     MAX_DESCRIPTION_LENGTH: 200
   }
 };
+
+// SETUP INSTRUCTIONS:
+// 1. Go to https://www.emailjs.com/ and sign up for a free account
+// 2. In the EmailJS dashboard:
+//    a. Click "Email Services" -> "Add New Service"
+//    b. Choose your email provider (Gmail, Outlook, etc.)
+//    c. Follow the setup instructions for your provider
+//    d. Copy the Service ID (looks like "service_xxxxxxx")
+// 3. Create an email template:
+//    a. Click "Email Templates" -> "Create New Template"
+//    b. Use these variables in your template:
+//       {{to_email}} - Recipient email
+//       {{from_name}} - Sender name
+//       {{subject}} - Email subject
+//       {{message}} - Analysis results
+//       {{analysis_date}} - Date of analysis
+//       {{total_files}} - Number of files analyzed
+//       {{total_issues}} - Total issues found
+//    c. Copy the Template ID (looks like "template_xxxxxxx")
+// 4. Get your Public Key:
+//    a. Click "Account" -> "API Keys"
+//    b. Copy your Public Key
+// 5. Replace the placeholder values above with your actual credentials
 
 // Email service configuration examples for different providers
 export const EMAIL_SERVICE_EXAMPLES = {
@@ -128,8 +156,8 @@ Generated on {{analysis_date}}
 export const validateEmailConfig = (config) => {
   const errors = [];
   
-  if (!config.USER_ID || config.USER_ID === "YOUR_EMAILJS_USER_ID") {
-    errors.push("USER_ID must be set to your actual EmailJS User ID");
+  if (!config.USER_ID || config.USER_ID === "YOUR_EMAILJS_PUBLIC_KEY") {
+    errors.push("USER_ID must be set to your actual EmailJS Public Key");
   }
   
   if (!config.SERVICE_ID || config.SERVICE_ID === "YOUR_EMAIL_SERVICE_ID") {
